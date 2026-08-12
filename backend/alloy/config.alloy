@@ -1,0 +1,15 @@
+prometheus.scrape "aircheck_backend" {
+  targets = [{"__address__" = "localhost:8080"}]
+  forward_to = [prometheus.remote_write.grafana_cloud.receiver]
+  scrape_interval = "15s"
+}
+
+prometheus.remote_write "grafana_cloud" {
+  endpoint {
+    url = sys.env("GRAFANA_REMOTE_WRITE_URL")
+    basic_auth {
+      username = sys.env("GRAFANA_INSTANCE_ID")
+      password = sys.env("GRAFANA_WRITE_TOKEN")
+    }
+  }
+}
