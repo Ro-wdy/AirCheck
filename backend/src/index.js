@@ -54,6 +54,18 @@ const baselines = {
 };
 
 let activeIncidents = [];
+let currentMetrics = {
+  bitrateKbps: baselines.bitrate,
+  bufferRatio: baselines.bufferRatio,
+  errorRate: baselines.errorRate,
+  viewers: baselines.viewers,
+  cdnLatencyMs: {
+    usEast: baselines.latency['us-east'],
+    usWest: baselines.latency['us-west'],
+    eu: baselines.latency['eu'],
+    apac: baselines.latency['apac']
+  }
+};
 
 // Helper for jitter
 const jitter = (val, range) => val + (Math.random() * range * 2 - range);
@@ -69,32 +81,45 @@ setInterval(() => {
 
   // Bitrate
   if (encoderFailure) {
-    streamBitrate.set(jitter(baselines.bitrate * 0.2, 50));
+    currentMetrics.bitrateKbps = jitter(baselines.bitrate * 0.2, 50);
   } else {
-    streamBitrate.set(jitter(baselines.bitrate, 200));
+    currentMetrics.bitrateKbps = jitter(baselines.bitrate, 200);
   }
+  streamBitrate.set(currentMetrics.bitrateKbps);
 
   // Buffer Ratio
   if (encoderFailure) {
-    streamBufferRatio.set(jitter(0.15, 0.02));
+    currentMetrics.bufferRatio = jitter(0.15, 0.02);
   } else {
-    streamBufferRatio.set(Math.max(0, jitter(baselines.bufferRatio, 0.005)));
+    currentMetrics.bufferRatio = Math.max(0, jitter(baselines.bufferRatio, 0.005));
   }
+  streamBufferRatio.set(currentMetrics.bufferRatio);
 
   // CDN Latency & Error Rate
+  const regionKeyMap = {
+    'us-east': 'usEast',
+    'us-west': 'usWest',
+    'eu': 'eu',
+    'apac': 'apac'
+  };
+
   Object.keys(baselines.latency).forEach(region => {
     const cdnFailure = activeIncidents.find(i => i.type === 'cdn_failure' && i.region === region);
+    let latency;
     if (cdnFailure) {
-      cdnLatency.set({ region }, jitter(baselines.latency[region] * 5, 20));
-      streamErrorRate.set(jitter(5.0, 0.5)); // High error rate during CDN failure
+      latency = jitter(baselines.latency[region] * 5, 20);
+      currentMetrics.errorRate = jitter(5.0, 0.5); // High error rate during CDN failure
     } else {
-      cdnLatency.set({ region }, jitter(baselines.latency[region], 5));
+      latency = jitter(baselines.latency[region], 5);
     }
+    currentMetrics.cdnLatencyMs[regionKeyMap[region]] = latency;
+    cdnLatency.set({ region }, latency);
   });
 
   if (!activeIncidents.some(i => i.type === 'cdn_failure')) {
-    streamErrorRate.set(Math.max(0, jitter(baselines.errorRate, 0.02)));
+    currentMetrics.errorRate = Math.max(0, jitter(baselines.errorRate, 0.02));
   }
+  streamErrorRate.set(currentMetrics.errorRate);
 
   // Viewers (slow drift + spike simulation)
   if (trafficSpike) {
@@ -102,7 +127,8 @@ setInterval(() => {
   } else {
     baselines.viewers += (Math.random() > 0.5 ? 1 : -1) * Math.floor(Math.random() * 10);
   }
-  concurrentViewers.set(Math.floor(baselines.viewers));
+  currentMetrics.viewers = Math.floor(baselines.viewers);
+  concurrentViewers.set(currentMetrics.viewers);
 
 }, 2000);
 
@@ -113,18 +139,20 @@ app.get('/metrics', async (req, res) => {
 });
 
 app.get('/metrics.json', async (req, res) => {
-  const metrics = await register.getMetricsAsJSON();
-  const result = {};
-  metrics.forEach(m => {
-    if (m.type === 'gauge') {
-      if (m.values.length > 1) {
-        result[m.name] = m.values.map(v => ({ labels: v.labels, value: v.value }));
-      } else {
-        result[m.name] = m.values[0]?.value;
-      }
-    }
+  const { bitrateKbps, errorRate, bufferRatio } = currentMetrics;
+  
+  let status = 'healthy';
+  if (bitrateKbps < 1000 || errorRate > 5.0) {
+    status = 'critical';
+  } else if (bitrateKbps < 3000 || errorRate > 1.0 || bufferRatio > 0.05) {
+    status = 'degraded';
+  }
+
+  res.json({
+    ...currentMetrics,
+    status,
+    timestamp: new Date().toISOString()
   });
-  res.json(result);
 });
 
 app.post('/simulate-incident', (req, res) => {
